@@ -1,10 +1,10 @@
 [package]
 name = "p0w"
-description = ""
+description = "Merkle tree Proof-of-Work (PoW)"
 version = "0.1.0"
-homepage = ""
-repository = ""
-documentation = ""
+homepage = "https://github.com/r3v2d0g/p0w"
+repository = "https://github.com/r3v2d0g/p0w.git"
+documentation = "https://docs.rs/p0w"
 keywords = []
 categories = []
 readme = "README.org"
