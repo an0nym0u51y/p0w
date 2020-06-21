@@ -29,3 +29,6 @@ optional = true
 version = "1.0"
 features = ["derive"]
 optional = true
+
+[dev-dependencies]
+proptest = "0.10"
