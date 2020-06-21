@@ -22,9 +22,9 @@
 //! levels, in which leaves are equal to `hmac(h(desc), leaf)` (with `desc` the service description,
 //! and `leaf` the zero-based index of the leaf).
 //!
-//! [`Tree::proofs()`] then creates a [`Proofs`] for the tree with a specified number of
-//! evenly-distributed, randomly selected leaves, their sibling and the internal nodes required to
-//! prove the validity of the tree up to its root node.
+//! [`Tree::gen_proofs(_with)?()`] then creates a [`Proofs`] for the tree with an eventually
+//! specified number of evenly-distributed, randomly selected leaves, their sibling and the internal
+//! nodes required to prove the validity of the tree.
 //!
 //! ## Example
 //!
@@ -32,10 +32,12 @@
 //! use p0w::Tree;
 //!
 //! let tree = Tree::new("foobar", 16);
-//! let proofs = tree.proofs(4);
+//! let proofs = tree.gen_proofs();
 //!
 //! assert!(proofs.verify().is_ok());
 //! ```
+//!
+//! [`Tree::gen_proofs(_with)?()`]: `Tree::gen_proofs()`
 
 // =========================================== Imports ========================================== \\
 
@@ -46,6 +48,9 @@ use rand_chacha::ChaCha20Rng;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use thiserror::Error;
 
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +59,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug)]
 /// A Merkle tree used to generate a [`Proofs`]
 pub struct Tree {
-    desc: String,
+    desc: Vec<u8>,
     levels: usize,
     nodes: Vec<Hash>,
 }
@@ -63,7 +68,7 @@ pub struct Tree {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 /// The actual Proof-of-work
 pub struct Proofs {
-    desc: String,
+    desc: Vec<u8>,
     levels: usize,
     proofs: usize,
     nodes: BTreeMap<usize, [u8; 32]>,
@@ -78,18 +83,6 @@ pub enum Error {
     TooManyNodes { expected: usize, nodes: usize },
     #[error("wrong hash for leaf {0}")]
     WrongLeafHash(usize),
-}
-
-// ========================================== leaves() ========================================== \\
-
-#[inline]
-fn nodes(levels: usize) -> usize {
-    (1 << levels) - 1
-}
-
-#[inline]
-fn leaves(levels: usize) -> usize {
-    1 << (levels - 1)
 }
 
 // ========================================== impl Tree ========================================= \\
@@ -113,25 +106,24 @@ impl Tree {
     /// use p0w::Tree;
     ///
     /// let tree = Tree::new("foobar", 8);
-    /// let proofs = tree.proofs(2);
+    /// let proofs = tree.gen_proofs();
     ///
     /// assert!(proofs.verify().is_ok());
     /// ```
-    pub fn new<Desc: ToString>(desc: Desc, levels: usize) -> Self {
+    pub fn new<Desc: Into<Vec<u8>>>(desc: Desc, levels: usize) -> Self {
         assert!(levels > 1);
 
-        let desc = desc.to_string();
-        let service = blake3::hash(desc.as_bytes());
+        let desc = desc.into();
+        let service = blake3::hash(&desc);
 
-        let mut nodes = vec![Hash::from([0; 32]); nodes(levels)];
-        let offset = leaves(levels) - 1;
-        let leaves = nodes.get_mut(offset..).unwrap();
+        let mut nodes = vec![Hash::from([0; 32]); Self::tree_nodes(levels)];
+        let leaves = nodes.get_mut(Self::offset(levels - 1)..).unwrap();
 
         for (leaf, node) in leaves.iter_mut().enumerate() {
             *node = blake3::keyed_hash(service.as_bytes(), &leaf.to_le_bytes()[..]);
         }
 
-        for node in (0..offset).rev() {
+        for node in (0..Self::offset(levels - 1)).rev() {
             nodes[node] = Hasher::new()
                 .update(&nodes[2 * node + 1].as_bytes()[..])
                 .update(&nodes[2 * node + 2].as_bytes()[..])
@@ -145,6 +137,83 @@ impl Tree {
         }
     }
 
+    #[cfg(feature = "rayon")]
+    /// Creates a new merkle tree with the specified service description and number of levels
+    /// (including the root) using [`rayon`] to parallelize the hash operations.
+    ///
+    /// Increasing the number of levels will also increase the time spent computing the tree (ie.
+    /// this is the way to increase the 'difficulty').
+    ///
+    /// ## Panics
+    ///
+    /// This function will panic if `levels` is less than `2`.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use p0w::Tree;
+    ///
+    /// let tree = Tree::par_new("foobar", 8);
+    /// let proofs = tree.gen_proofs();
+    ///
+    /// assert!(proofs.verify().is_ok());
+    /// ```
+    pub fn par_new<Desc: Into<Vec<u8>>>(desc: Desc, levels: usize) -> Self {
+        assert!(levels > 1);
+
+        let desc = desc.into();
+        let service = blake3::hash(&desc);
+
+        let mut nodes = vec![Hash::from([0; 32]); Self::tree_nodes(levels)];
+
+        nodes[Self::offset(levels - 1)..]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(leaf, node)| {
+                *node = blake3::keyed_hash(service.as_bytes(), &leaf.to_le_bytes()[..]);
+            });
+
+        for level in (0..(levels - 1)).rev() {
+            let (cur, prev) = nodes[Self::offset(level)..Self::offset(level + 2)]
+                .split_at_mut(Self::nodes(level));
+
+            prev.par_chunks(2).zip(cur).for_each(|(prev, node)| {
+                *node = Hasher::new()
+                    .update(&prev[0].as_bytes()[..])
+                    .update(&prev[1].as_bytes()[..])
+                    .finalize();
+            });
+        }
+
+        Tree {
+            desc,
+            levels,
+            nodes,
+        }
+    }
+
+    // ======================================= Helpers ====================================== \\
+
+    #[inline]
+    fn tree_nodes(levels: usize) -> usize {
+        (1 << levels) - 1
+    }
+
+    #[inline]
+    fn leaves(levels: usize) -> usize {
+        1 << (levels - 1)
+    }
+
+    #[inline]
+    fn nodes(level: usize) -> usize {
+        1 << level
+    }
+
+    #[inline]
+    fn offset(level: usize) -> usize {
+        Self::nodes(level) - 1
+    }
+
     // ======================================== Read ======================================== \\
 
     /// Returns the tree's service description (as passed to [`Tree::new()`]).
@@ -154,10 +223,10 @@ impl Tree {
     /// ```rust
     /// use p0w::Tree;
     ///
-    /// let tree = Tree::new("foobar", 4);
-    /// assert_eq!(tree.description(), "foobar");
+    /// let tree = Tree::new("foobar", 8);
+    /// assert_eq!(tree.description(), b"foobar");
     /// ```
-    pub fn description(&self) -> &str {
+    pub fn description(&self) -> &[u8] {
         &self.desc
     }
 
@@ -169,23 +238,72 @@ impl Tree {
     /// ```rust
     /// use p0w::Tree;
     ///
-    /// let tree = Tree::new("foobar", 4);
-    /// assert_eq!(tree.levels(), 4);
+    /// let tree = Tree::new("foobar", 8);
+    /// assert_eq!(tree.levels(), 8);
     /// ```
     pub fn levels(&self) -> usize {
         self.levels
     }
 
-    /// Generates a new [`Proofs`] containing the hashes of `2 * proofs` leaves (because the sibling
-    /// of each leaf is required) and all internal nodes required to prove the validity of the tree
-    /// up to its root node.
+    /// Returns the tree's nodes in order (level by level).
     ///
-    /// This method selects the leaves in a random but evenly-distributed manner using a
-    /// [`ChaCha20Rng`] instance seeded with the tree's root node.
+    /// ## Example
+    ///
+    /// ```rust
+    /// use p0w::Tree;
+    ///
+    /// let tree = Tree::new("foobar", 8);
+    ///
+    /// let nodes = tree.as_nodes();
+    /// assert_eq!(nodes.len(), 255);
+    /// ```
+    pub fn as_nodes(&self) -> &[Hash] {
+        &self.nodes
+    }
+
+    /// Generates a new [`Proofs`] containing `16 * levels` (as passed to [`Tree::new()`])
+    /// evenly-distributed, randomly selected leaves along with all internal nodes required to prove
+    /// the validity of the tree.
+    ///
+    /// This method selects the leaves in a random but evenly-distributed manner by seeding a
+    /// [`ChaCha20Rng`] instance with the tree's root node, and generating `8 * levels` numbers in
+    /// the range `0..(leaves / 8)`.
+    ///
+    /// This method is equivalent to calling [`Tree::gen_proofs_with(8 * levels)`].
     ///
     /// ## Panics
     ///
-    /// This function will panic if `proofs` is `0` or *greater than* the number of leaves the tree
+    /// This method panics if `levels` is *less than* `7`.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use p0w::Tree;
+    ///
+    /// let tree = Tree::new("foobar", 8);
+    /// let proofs = tree.gen_proofs();
+    ///
+    /// assert_eq!(proofs.proofs(), 64);
+    /// ```
+    ///
+    /// [`Tree::gen_proofs_with(8 * levels)`]: `Tree::gen_proofs_with()`
+    pub fn gen_proofs(&self) -> Proofs {
+        self.gen_proofs_with(8 * self.levels)
+    }
+
+    /// Generates a new [`Proofs`] containing `2 * proofs` evenly-distributed, randomly selected
+    /// leaves along with all internal nodes required to prove the validity of the tree.
+    ///
+    /// This method selects the leaves in a random but evenly-distributed manner by seeding a
+    /// [`ChaCha20Rng`] instance with the tree's root node, and generating `proofs` numbers in
+    /// the range `0..(leaves / proofs)`.
+    ///
+    /// It is recommended that `proofs` is *at least* 8 times greater than the number of levels in
+    /// the tree (as passed to [`Tree::new()`]).
+    ///
+    /// ## Panics
+    ///
+    /// This method panics if `proofs` is `0` or *greater than* the number of leaves the tree
     /// contains (`leaves = 2 ^ (levels - 1)`).
     ///
     /// ## Example
@@ -194,28 +312,26 @@ impl Tree {
     /// use p0w::Tree;
     ///
     /// let tree = Tree::new("foobar", 8);
-    /// let proofs = tree.proofs(2);
+    /// let proofs = tree.gen_proofs_with(64);
     ///
-    /// assert!(proofs.verify().is_ok());
+    /// assert_eq!(proofs.proofs(), 64);
     /// ```
-    pub fn proofs(&self, proofs: usize) -> Proofs {
+    pub fn gen_proofs_with(&self, proofs: usize) -> Proofs {
         assert!(proofs > 0);
-        assert!(proofs <= leaves(self.levels));
+        assert!(proofs <= Tree::leaves(self.levels));
 
         let mut nodes = BTreeMap::new();
         let mut visited = BTreeSet::new();
 
         // seed the rng with the root node
         let mut rng = ChaCha20Rng::from_seed(self.nodes[0].into());
-        let chunks = leaves(self.levels) as f64 / proofs as f64;
-        let offset = leaves(self.levels) - 1;
+        let chunks = Tree::leaves(self.levels) as f64 / proofs as f64;
+        let offset = Tree::leaves(self.levels) - 1;
 
         // randomly select the leaves in an evenly-distributed manner
         for proof in 0..proofs {
-            let distribution = Uniform::new(
-                chunks * proof as f64,
-                chunks * (proof + 1) as f64,
-            );
+            let distribution =
+                Uniform::new(chunks * proof as f64, chunks * (proof + 1) as f64 - 1.0);
 
             let leaf = distribution.sample(&mut rng).ceil() as usize;
             let node = offset + leaf;
@@ -266,12 +382,12 @@ impl Proofs {
     /// ```rust
     /// use p0w::Tree;
     ///
-    /// let tree = Tree::new("foobar", 4);
-    /// let proofs = tree.proofs(1);
+    /// let tree = Tree::new("foobar", 8);
+    /// let proofs = tree.gen_proofs();
     ///
-    /// assert_eq!(proofs.description(), "foobar");
+    /// assert_eq!(proofs.description(), b"foobar");
     /// ```
-    pub fn description(&self) -> &str {
+    pub fn description(&self) -> &[u8] {
         &self.desc
     }
 
@@ -283,17 +399,17 @@ impl Proofs {
     /// ```rust
     /// use p0w::Tree;
     ///
-    /// let tree = Tree::new("foobar", 4);
-    /// let proofs = tree.proofs(1);
+    /// let tree = Tree::new("foobar", 8);
+    /// let proofs = tree.gen_proofs();
     ///
-    /// assert_eq!(proofs.levels(), 4);
+    /// assert_eq!(proofs.levels(), 8);
     /// ```
     pub fn levels(&self) -> usize {
         self.levels
     }
 
-    /// Returns the number of minimum number of leaves included in the proofs (as passed to
-    /// [`Tree::proofs()`]).
+    /// Returns the number of proofs (`leaves / 2`) included in the [`Proofs`] (as passed to
+    /// [`Tree::gen_proofs_with()`] or `8 * levels` if [`Tree::gen_proofs()`] was used).
     ///
     /// ## Example
     ///
@@ -301,18 +417,40 @@ impl Proofs {
     /// use p0w::Tree;
     ///
     /// let tree = Tree::new("foobar", 8);
-    /// let proofs = tree.proofs(2);
+    /// let proofs = tree.gen_proofs_with(64);
     ///
-    /// assert_eq!(proofs.proofs(), 2);
+    /// assert_eq!(proofs.proofs(), 64);
     /// ```
+    ///
+    /// [`Tree::gen_proofs(_with)?()`]: `Tree::gen_proofs()`
     pub fn proofs(&self) -> usize {
         self.proofs
+    }
+
+    /// Returns a [`BTreeMap`] associating the index of the nodes included in the proofs to their
+    /// hash.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use p0w::Tree;
+    ///
+    /// let tree_a = Tree::new("foobar", 8);
+    /// let proofs_a = tree_a.gen_proofs();
+    ///
+    /// let tree_b = Tree::new("foobar", 8);
+    /// let proofs_b = tree_b.gen_proofs();
+    ///
+    /// assert_eq!(proofs_a.as_nodes(), proofs_b.as_nodes());
+    /// ```
+    pub fn as_nodes(&self) -> &BTreeMap<usize, [u8; 32]> {
+        &self.nodes
     }
 
     /// Verifies that the proofs are valid, returning an [`Error`] otherwise.
     ///
     /// This function does the following verification (in order):
-    /// - the nodes that are included in the proofs allow to verify the tree up to its root
+    /// - the nodes that are included in the proofs allow to verify the tree
     /// - there are no unnecessary nodes included in the proofs
     /// - the included leaves have the right hashes
     /// - the right leaves were included
@@ -323,12 +461,12 @@ impl Proofs {
     /// use p0w::Tree;
     ///
     /// let tree = Tree::new("foobar", 8);
-    /// let proofs = tree.proofs(2);
+    /// let proofs = tree.gen_proofs();
     ///
     /// assert!(proofs.verify().is_ok());
     /// ```
     pub fn verify(&self) -> Result<(), Error> {
-        let offset = leaves(self.levels) - 1;
+        let leaves_offset = Tree::leaves(self.levels) - 1;
         let mut expected = 0;
         let mut nodes = BTreeSet::new();
         let mut queue = VecDeque::with_capacity(self.nodes.len());
@@ -342,8 +480,8 @@ impl Proofs {
                 continue;
             }
 
-            if node >= offset {
-                return Err(Error::MissingLeaf(node - offset));
+            if node >= leaves_offset {
+                return Err(Error::MissingLeaf(node - leaves_offset));
             }
 
             nodes.insert(node);
@@ -360,13 +498,14 @@ impl Proofs {
         }
 
         // re-compute the included leaves' hashes and compare them against the ones in the proofs
-        let service = blake3::hash(self.desc.as_bytes());
+        let service = blake3::hash(&self.desc);
         for (leaf, hash) in self
             .nodes
-            .range(offset..)
-            .map(|(node, hash)| ((node - offset), hash))
+            .range(leaves_offset..)
+            .map(|(node, hash)| ((node - leaves_offset), hash))
         {
-            if Hash::from(*hash) != blake3::keyed_hash(service.as_bytes(), &leaf.to_le_bytes()[..]) {
+            if Hash::from(*hash) != blake3::keyed_hash(service.as_bytes(), &leaf.to_le_bytes()[..])
+            {
                 return Err(Error::WrongLeafHash(leaf));
             }
         }
@@ -385,17 +524,15 @@ impl Proofs {
         }
 
         let mut rng = ChaCha20Rng::from_seed(hashes[&0]);
-        let chunks = leaves(self.levels) as f64 / self.proofs as f64;
+        let chunks = Tree::leaves(self.levels) as f64 / self.proofs as f64;
 
         // verify that the right leaves were included
         for proof in 0..self.proofs {
-            let distribution = Uniform::new(
-                chunks * proof as f64,
-                chunks * (proof + 1) as f64,
-            );
+            let distribution =
+                Uniform::new(chunks * proof as f64, chunks * (proof + 1) as f64 - 1.0);
 
             let leaf = distribution.sample(&mut rng).ceil() as usize;
-            if !self.nodes.contains_key(&(leaf + offset)) {
+            if !self.nodes.contains_key(&(leaf + leaves_offset)) {
                 return Err(Error::MissingLeaf(leaf));
             }
         }

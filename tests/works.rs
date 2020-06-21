@@ -14,7 +14,15 @@ use p0w::Tree;
 
 #[test]
 fn works() {
-    let tree = Tree::new("foobar", 10);
-    let proofs = tree.proofs(4);
+    let tree = Tree::new("foobar", 20);
+    let proofs = tree.gen_proofs();
+    assert!(proofs.verify().is_ok());
+}
+
+#[cfg(feature = "rayon")]
+#[test]
+fn par_works() {
+    let tree = Tree::par_new("foobar", 20);
+    let proofs = tree.gen_proofs();
     assert!(proofs.verify().is_ok());
 }
