@@ -98,7 +98,7 @@ impl Tree {
     ///
     /// ## Panics
     ///
-    /// This function will panic if `levels` is less than `2`.
+    /// This function will panic if `levels` is *less than* `2`.
     ///
     /// ## Example
     ///
@@ -373,6 +373,47 @@ impl Tree {
 // ========================================= impl Proof ========================================= \\
 
 impl Proofs {
+    // ==================================== Constructors ==================================== \\
+
+    /// Creates a new [`Proofs`] instance from a service description, number of levels, number of
+    /// proofs and [`BTreeMap`] associating the index of nodes to their hash.
+    ///
+    /// ## Panics
+    ///
+    /// This function will panic if `levels` is *less than* `2`, or if `proofs` is `0` or *greater
+    /// than* the number of leaves the tree contains (`leaves = 2 ^ (levels - 1)`).
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use p0w::{Proofs, Tree};
+    ///
+    /// let tree = Tree::new("foobar", 8);
+    /// let proofs = tree.gen_proofs_with(64);
+    ///
+    /// let nodes = proofs.into_nodes();
+    /// let proofs = Proofs::new("foobar", 8, 64, nodes);
+    ///
+    /// assert!(proofs.verify().is_ok());
+    /// ```
+    pub fn new<Desc: Into<Vec<u8>>>(
+        desc: Desc,
+        levels: usize,
+        proofs: usize,
+        nodes: BTreeMap<usize, [u8; 32]>,
+    ) -> Self {
+        assert!(levels > 1);
+        assert!(proofs > 0);
+        assert!(proofs <= Tree::leaves(levels));
+
+        Proofs {
+            desc: desc.into(),
+            levels,
+            proofs,
+            nodes,
+        }
+    }
+
     // ======================================== Read ======================================== \\
 
     /// Returns the tree's service description (as passed to [`Tree::new()`]).
@@ -427,8 +468,8 @@ impl Proofs {
         self.proofs
     }
 
-    /// Returns a [`BTreeMap`] associating the index of the nodes included in the proofs to their
-    /// hash.
+    /// Returns a reference to a [`BTreeMap`] associating the index of the nodes included in the
+    /// [`Proofs`] to their hash.
     ///
     /// ## Example
     ///
@@ -445,6 +486,26 @@ impl Proofs {
     /// ```
     pub fn as_nodes(&self) -> &BTreeMap<usize, [u8; 32]> {
         &self.nodes
+    }
+
+    /// Returns a [`BTreeMap`] associating the index of the nodes included in the [`Proofs`] to
+    /// their hash, consuming the `Proofs`.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use p0w::Tree;
+    ///
+    /// let tree_a = Tree::new("foobar", 8);
+    /// let proofs_a = tree_a.gen_proofs();
+    ///
+    /// let tree_b = Tree::new("foobar", 8);
+    /// let proofs_b = tree_b.gen_proofs();
+    ///
+    /// assert_eq!(proofs_a.into_nodes(), proofs_b.into_nodes());
+    /// ```
+    pub fn into_nodes(self) -> BTreeMap<usize, [u8; 32]> {
+        self.nodes
     }
 
     /// Verifies that the proofs are valid, returning an [`Error`] otherwise.
@@ -538,5 +599,13 @@ impl Proofs {
         }
 
         Ok(())
+    }
+}
+
+// ========================================== impl Into ========================================= \\
+
+impl Into<BTreeMap<usize, [u8; 32]>> for Proofs {
+    fn into(self) -> BTreeMap<usize, [u8; 32]> {
+        self.nodes
     }
 }
