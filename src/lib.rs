@@ -48,7 +48,7 @@ use rand_chacha::ChaCha20Rng;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use thiserror::Error;
 
-#[cfg(feature = "rayon")]
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 #[cfg(feature = "serde")]
@@ -80,7 +80,10 @@ pub struct Proofs {
 pub enum Error {
     #[cfg_attr(feature = "thiserror", error("missing leaf {0} in proof"))]
     MissingLeaf(usize),
-    #[cfg_attr(feature = "thiserror", error("too many nodes in proof (expected {expected} nodes; contains {nodes} nodes)"))]
+    #[cfg_attr(
+        feature = "thiserror",
+        error("too many nodes in proof (expected {expected} nodes; contains {nodes} nodes)")
+    )]
     TooManyNodes { expected: usize, nodes: usize },
     #[cfg_attr(feature = "thiserror", error("wrong hash for leaf {0}"))]
     WrongLeafHash(usize),
@@ -139,7 +142,8 @@ impl Tree {
         }
     }
 
-    #[cfg(feature = "rayon")]
+    #[cfg(feature = "parallel")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
     /// Creates a new Merkle tree with the specified service description and number of levels
     /// (including the root) using [`rayon`] to parallelize the hash operations.
     ///
