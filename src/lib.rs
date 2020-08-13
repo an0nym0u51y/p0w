@@ -74,14 +74,15 @@ pub struct Proofs {
     nodes: BTreeMap<usize, [u8; 32]>,
 }
 
-#[derive(Error, Debug)]
+#[derive(Debug)]
+#[cfg_attr(feature = "thiserror", derive(Error))]
 /// The error type returned by [`Proofs::verify()`]
 pub enum Error {
-    #[error("missing leaf {0} in proof")]
+    #[cfg_attr(feature = "thiserror", error("missing leaf {0} in proof"))]
     MissingLeaf(usize),
-    #[error("too many nodes in proof (expected {expected} nodes; contains {nodes} nodes)")]
+    #[cfg_attr(feature = "thiserror", error("too many nodes in proof (expected {expected} nodes; contains {nodes} nodes)"))]
     TooManyNodes { expected: usize, nodes: usize },
-    #[error("wrong hash for leaf {0}")]
+    #[cfg_attr(feature = "thiserror", error("wrong hash for leaf {0}"))]
     WrongLeafHash(usize),
 }
 
@@ -90,7 +91,7 @@ pub enum Error {
 impl Tree {
     // ==================================== Constructors ==================================== \\
 
-    /// Creates a new merkle tree with the specified service description and number of levels
+    /// Creates a new Merkle tree with the specified service description and number of levels
     /// (including the root).
     ///
     /// Increasing the number of levels will also increase the time spent computing the tree (ie.
@@ -124,9 +125,10 @@ impl Tree {
         }
 
         for node in (0..Self::offset(levels - 1)).rev() {
+            let base = node << 1;
             nodes[node] = Hasher::new()
-                .update(&nodes[2 * node + 1].as_bytes()[..])
-                .update(&nodes[2 * node + 2].as_bytes()[..])
+                .update(&nodes[base + 1].as_bytes()[..])
+                .update(&nodes[base + 2].as_bytes()[..])
                 .finalize();
         }
 
@@ -138,7 +140,7 @@ impl Tree {
     }
 
     #[cfg(feature = "rayon")]
-    /// Creates a new merkle tree with the specified service description and number of levels
+    /// Creates a new Merkle tree with the specified service description and number of levels
     /// (including the root) using [`rayon`] to parallelize the hash operations.
     ///
     /// Increasing the number of levels will also increase the time spent computing the tree (ie.
